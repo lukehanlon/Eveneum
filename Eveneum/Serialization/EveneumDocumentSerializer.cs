@@ -8,7 +8,7 @@ namespace Eveneum.Serialization
     public class EveneumDocumentSerializer
     {
         public JsonSerializer JsonSerializer { get; }
-        public ITypeProvider TypeProvider { get; }
+        public ITypeProvider TypeProvider { get; set; }
         public bool IgnoreMissingTypes { get; }
 
         public EveneumDocumentSerializer(JsonSerializer jsonSerializer = null, ITypeProvider typeProvider = null, bool ignoreMissingTypes = false)
@@ -43,14 +43,15 @@ namespace Eveneum.Serialization
             }
         }
 
-        internal EveneumDocument SerializeEvent(EventData @event, string streamId)
+        internal EveneumDocument SerializeEvent(EventData @event, string streamId, string partitionKey)
         {
             var document = new EveneumDocument(DocumentType.Event)
             {
                 StreamId = streamId,
                 Version = @event.Version,
                 BodyType = this.TypeProvider.GetIdentifierForType(@event.Body.GetType()),
-                Body = JToken.FromObject(@event.Body, this.JsonSerializer)
+                Body = JToken.FromObject(@event.Body, this.JsonSerializer),
+                PartitionKey = partitionKey
             };
 
             if (@event.Metadata != null)

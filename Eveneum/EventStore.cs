@@ -48,14 +48,14 @@ namespace Eveneum
             await CreateStoredProcedure(BulkDeleteStoredProc, "BulkDelete", cancellationToken);
         }
 
-        public Task<StreamResponse> ReadStreamAsOfVersion(string streamId, ulong version, CancellationToken cancellationToken = default) =>
-            ReadStream(streamId, new ReadStreamOptions { FromVersion = null, ToVersion = version, IgnoreSnapshots = false, MaxItemCount = 100 }, cancellationToken);
-        public Task<StreamResponse> ReadStreamFromVersion(string streamId, ulong version, CancellationToken cancellationToken = default) =>
-            ReadStream(streamId, new ReadStreamOptions { FromVersion = version, ToVersion = null, IgnoreSnapshots = true, MaxItemCount = null }, cancellationToken);
-        public Task<StreamResponse> ReadStreamIgnoringSnapshots(string streamId, CancellationToken cancellationToken = default) =>
-            ReadStream(streamId, new ReadStreamOptions { FromVersion = null, ToVersion = null, IgnoreSnapshots = true, MaxItemCount = null }, cancellationToken);
+        public Task<StreamResponse> ReadStreamAsOfVersion(string partitionKey, string streamId, ulong version, CancellationToken cancellationToken = default) =>
+            ReadStream(partitionKey, streamId, new ReadStreamOptions { FromVersion = null, ToVersion = version, IgnoreSnapshots = false, MaxItemCount = 100 }, cancellationToken);
+        public Task<StreamResponse> ReadStreamFromVersion(string partitionKey, string streamId, ulong version, CancellationToken cancellationToken = default) =>
+            ReadStream(partitionKey, streamId, new ReadStreamOptions { FromVersion = version, ToVersion = null, IgnoreSnapshots = true, MaxItemCount = null }, cancellationToken);
+        public Task<StreamResponse> ReadStreamIgnoringSnapshots(string partitionKey, string streamId, CancellationToken cancellationToken = default) =>
+            ReadStream(partitionKey, streamId, new ReadStreamOptions { FromVersion = null, ToVersion = null, IgnoreSnapshots = true, MaxItemCount = null }, cancellationToken);
 
-        public Task<StreamResponse> ReadStream(string streamId, ReadStreamOptions options = null, CancellationToken cancellationToken = default)
+        public Task<StreamResponse> ReadStream(string partitionKey, string streamId, ReadStreamOptions options = null, CancellationToken cancellationToken = default)
         {
             options = options ?? new ReadStreamOptions();
 
@@ -64,13 +64,13 @@ namespace Eveneum
             var whereTerms = new List<string>();
 
             if (options.IgnoreSnapshots)
-                whereTerms.Add($"x.{nameof(EveneumDocument.DocumentType)} <> '{nameof(DocumentType.Snapshot)}'");
+                whereTerms.Add($"x.dt <> '{nameof(DocumentType.Snapshot)}'");
 
             if (options.FromVersion.HasValue)
-                whereTerms.Add($"(x.{nameof(EveneumDocument.Version)} >= {options.FromVersion.Value} OR x.{nameof(EveneumDocument.DocumentType)} = '{nameof(DocumentType.Header)}')");
+                whereTerms.Add($"(x.v >= {options.FromVersion.Value} OR x.dt = '{nameof(DocumentType.Header)}')");
 
             if (options.ToVersion.HasValue)
-                whereTerms.Add($"(x.{nameof(EveneumDocument.Version)} <= {options.ToVersion.Value} OR x.{nameof(EveneumDocument.DocumentType)} = '{nameof(DocumentType.Header)}')");
+                whereTerms.Add($"(x.v <= {options.ToVersion.Value} OR x.dt = '{nameof(DocumentType.Header)}')");
 
             var selectClause = "SELECT * FROM x";
             var whereClause = whereTerms.Count > 0 
@@ -80,15 +80,15 @@ namespace Eveneum
 
             var query = $"{selectClause} {whereClause} {orderByClause}";
 
-            return ReadStream(streamId, query, maxItemCount, cancellationToken);
+            return ReadStream(partitionKey, streamId, query, maxItemCount, cancellationToken);
         }
 
-        private async Task<StreamResponse> ReadStream(string streamId, string sql, int maxItemCount, CancellationToken cancellationToken)
+        private async Task<StreamResponse> ReadStream(string partitionKey, string streamId, string sql, int maxItemCount, CancellationToken cancellationToken)
         {
             if (streamId == null)
                 throw new ArgumentNullException(nameof(streamId));
 
-            var iterator = this.Container.GetItemQueryIterator<EveneumDocument>(sql, requestOptions: new QueryRequestOptions { PartitionKey = new PartitionKey(streamId), MaxItemCount = maxItemCount });
+            var iterator = this.Container.GetItemQueryIterator<EveneumDocument>(sql, requestOptions: new QueryRequestOptions { PartitionKey = new PartitionKey(partitionKey), MaxItemCount = maxItemCount });
 
             var documents = new List<EveneumDocument>();
             var finishLoading = false;
@@ -144,7 +144,76 @@ namespace Eveneum
             }
         }
 
-        public async Task<Response> WriteToStream(string streamId, EventData[] events, ulong? expectedVersion = null, object metadata = null, CancellationToken cancellationToken = default)
+
+        public async Task<Response> WriteToPartition(string partitionKey,
+            EventStream[] eventStreams, CancellationToken cancellationToken = default)
+        {
+            var transaction = this.Container.CreateTransactionalBatch(new PartitionKey(partitionKey));
+            double requestCharge = 0;
+
+            var maximumItems = eventStreams.Sum(s => (s.Events.Length * 2) + 1);
+
+            if (maximumItems > 100)
+            {
+                throw new NotSupportedException(
+                    $"The maximum number of events that can be written has been exceeded. Attempted to write {maximumItems} events. The maximum number is 49.");
+            }
+
+            foreach (var eventStream in eventStreams)
+            {
+                // Existing stream
+                if (eventStream.ExpectedVersion.HasValue)
+                {
+                    var headerResponse = await this.ReadHeaderDocument(partitionKey, eventStream.StreamId,  cancellationToken);
+
+                    var header = headerResponse.Document;
+                    requestCharge += headerResponse.RequestCharge;
+
+                    if (header.Deleted)
+                        throw new StreamDeletedException(eventStream.StreamId, requestCharge);
+
+                    if (header.Version != eventStream.ExpectedVersion)
+                        throw new OptimisticConcurrencyException(eventStream.StreamId, requestCharge, eventStream.ExpectedVersion.Value,
+                            header.Version);
+
+                    header.Version += (ulong)eventStream.Events.Length;
+
+                    this.Serializer.SerializeHeaderMetadata(header, eventStream.Metadata);
+
+                    transaction.ReplaceItem(header.Id, header,
+                        new TransactionalBatchItemRequestOptions { IfMatchEtag = header.ETag });
+                }
+                else
+                {
+                    var header = new EveneumDocument(DocumentType.Header)
+                    { StreamId = eventStream.StreamId, Version = (ulong)eventStream.Events.Length, PartitionKey = partitionKey };
+
+                    this.Serializer.SerializeHeaderMetadata(header, eventStream.Metadata);
+
+                    transaction.CreateItem(header);
+                }
+
+                var events = eventStream.Events.Select(@event => this.Serializer.SerializeEvent(@event, eventStream.StreamId, partitionKey));
+                foreach (var document in events)
+                    transaction.CreateItem(document);
+                var idempotenceRecord = eventStream.Events.Select(@event => this.Serializer.SerializeEvent(@event, eventStream.StreamId, partitionKey));
+                foreach (var document in events)
+                    transaction.CreateItem(document);
+            }
+
+
+            var response = await transaction.ExecuteAsync(cancellationToken);
+            requestCharge += response.RequestCharge;
+
+            if (response.StatusCode == System.Net.HttpStatusCode.Conflict)
+                throw new StreamAlreadyExistsException(string.Join(",", eventStreams.Select(s => s.StreamId)), requestCharge);
+            else if (!response.IsSuccessStatusCode)
+                throw new WriteException(string.Join(",", eventStreams.Select(s => s.StreamId)), requestCharge, response.ErrorMessage, response.StatusCode);
+
+            return new Response(requestCharge);
+        }
+
+        public async Task<Response> WriteToStream(string partitionKey, string streamId, EventData[] events, ulong? expectedVersion = null, object metadata = null, CancellationToken cancellationToken = default)
         {
             var transaction = this.Container.CreateTransactionalBatch(new PartitionKey(streamId));
             double requestCharge = 0;
@@ -152,7 +221,7 @@ namespace Eveneum
             // Existing stream
             if (expectedVersion.HasValue)
             {
-                var headerResponse = await this.ReadHeaderDocument(streamId, cancellationToken);
+                var headerResponse = await this.ReadHeaderDocument(partitionKey, streamId, cancellationToken);
 
                 var header = headerResponse.Document;
                 requestCharge += headerResponse.RequestCharge;
@@ -178,7 +247,7 @@ namespace Eveneum
                 transaction.CreateItem(header);
             }
 
-            var firstBatch = events.Take(this.BatchSize - 1).Select(@event => this.Serializer.SerializeEvent(@event, streamId));
+            var firstBatch = events.Take(this.BatchSize - 1).Select(@event => this.Serializer.SerializeEvent(@event, streamId, partitionKey));
             foreach (var document in firstBatch)
                 transaction.CreateItem(document);
 
@@ -190,7 +259,7 @@ namespace Eveneum
             else if (!response.IsSuccessStatusCode)
                 throw new WriteException(streamId, requestCharge, response.ErrorMessage, response.StatusCode);
 
-            foreach (var batch in events.Skip(this.BatchSize - 1).Select(@event => this.Serializer.SerializeEvent(@event, streamId)).Batch(this.BatchSize))
+            foreach (var batch in events.Skip(this.BatchSize - 1).Select(@event => this.Serializer.SerializeEvent(@event, streamId, partitionKey)).Batch(this.BatchSize))
             {
                 transaction = this.Container.CreateTransactionalBatch(new PartitionKey(streamId));
 
@@ -207,9 +276,10 @@ namespace Eveneum
             return new Response(requestCharge);
         }
 
-        public async Task<DeleteResponse> DeleteStream(string streamId, ulong expectedVersion, CancellationToken cancellationToken = default)
+        public async Task<DeleteResponse> DeleteStream(string partitionKey, string streamId, ulong expectedVersion, CancellationToken cancellationToken = default)
         {
-            var headerResponse = await this.ReadHeaderDocument(streamId, cancellationToken);
+            var partitionKeyObject = new PartitionKey(partitionKey);
+            var headerResponse = await this.ReadHeaderDocument(partitionKey, streamId, cancellationToken);
 
             var existingHeader = headerResponse.Document;
             var requestCharge = headerResponse.RequestCharge;
@@ -223,7 +293,6 @@ namespace Eveneum
             if (existingHeader.Version != expectedVersion)
                 throw new OptimisticConcurrencyException(streamId, requestCharge, expectedVersion, existingHeader.Version);
 
-            var partitionKey = new PartitionKey(streamId);
             ulong deletedDocuments = 0;
 
             StoredProcedureExecuteResponse<BulkDeleteResponse> response;
@@ -232,12 +301,12 @@ namespace Eveneum
             var useSoftDeleteMode = (this.DeleteMode == DeleteMode.SoftDelete) || (this.DeleteMode == DeleteMode.TtlDelete);
 
             if (useSoftDeleteMode)
-                query += " WHERE c.Deleted = false";
+                query += " WHERE c.d = false";
 
             do
             {
                 var ttl = this.DeleteMode == DeleteMode.TtlDelete ? StreamTimeToLiveAfterDelete.TotalSeconds  : -1;                
-                response = await this.Container.Scripts.ExecuteStoredProcedureAsync<BulkDeleteResponse>(BulkDeleteStoredProc, partitionKey, new object[] { query, useSoftDeleteMode, ttl}, cancellationToken: cancellationToken);
+                response = await this.Container.Scripts.ExecuteStoredProcedureAsync<BulkDeleteResponse>(BulkDeleteStoredProc, partitionKeyObject, new object[] { query, useSoftDeleteMode, ttl}, cancellationToken: cancellationToken);
 
                 requestCharge += response.RequestCharge;
                 deletedDocuments += response.Resource.Deleted;
@@ -247,9 +316,9 @@ namespace Eveneum
             return new DeleteResponse(deletedDocuments, requestCharge);
         }
 
-        public async Task<Response> CreateSnapshot(string streamId, ulong version, object snapshot, object metadata = null, bool deleteOlderSnapshots = false, CancellationToken cancellationToken = default)
+        public async Task<Response> CreateSnapshot(string partitionKey, string streamId, ulong version, object snapshot, object metadata = null, bool deleteOlderSnapshots = false, CancellationToken cancellationToken = default)
         {
-            var headerResponse = await this.ReadHeaderDocument(streamId, cancellationToken);
+            var headerResponse = await this.ReadHeaderDocument(partitionKey,streamId, cancellationToken);
 
             var header = headerResponse.Document;
             var requestCharge = headerResponse.RequestCharge;
@@ -271,7 +340,7 @@ namespace Eveneum
 
             if (deleteOlderSnapshots)
             {
-                var deleteResponse = await this.DeleteSnapshots(streamId, version, cancellationToken);
+                var deleteResponse = await this.DeleteSnapshots(partitionKey, streamId, version, cancellationToken);
 
                 requestCharge += deleteResponse.RequestCharge;
             }
@@ -279,17 +348,17 @@ namespace Eveneum
             return new Response(requestCharge);
         }
 
-        public async Task<DeleteResponse> DeleteSnapshots(string streamId, ulong olderThanVersion, CancellationToken cancellationToken = default)
+        public async Task<DeleteResponse> DeleteSnapshots(string partitionKey, string streamId, ulong olderThanVersion, CancellationToken cancellationToken = default)
         {
-            var headerResponse = await this.ReadHeader(streamId, cancellationToken);
+            var headerResponse = await this.ReadHeader(partitionKey, streamId, cancellationToken);
 
             var requestCharge = headerResponse.RequestCharge;
             ulong deletedSnapshots = 0;
             StoredProcedureExecuteResponse<BulkDeleteResponse> response;
-            var query = $"SELECT * FROM c WHERE c.DocumentType = 'Snapshot' AND c.Version < {olderThanVersion}";
+            var query = $"SELECT * FROM c WHERE c.dt = 'Snapshot' AND c.Version < {olderThanVersion}";
 
             if (this.DeleteMode == DeleteMode.SoftDelete)
-                query += " and c.Deleted = false";
+                query += " and c.d = false";
 
             do
             {
@@ -303,7 +372,7 @@ namespace Eveneum
         }
 
         public Task<Response> LoadAllEvents(Func<IReadOnlyCollection<EventData>, Task> callback, CancellationToken cancellationToken = default) =>
-            this.LoadEvents($"SELECT * FROM c WHERE c.{nameof(EveneumDocument.DocumentType)} = '{nameof(DocumentType.Event)}'", callback, cancellationToken);
+            this.LoadEvents($"SELECT * FROM c WHERE c.dt = '{nameof(DocumentType.Event)}'", callback, cancellationToken);
 
         public Task<Response> LoadEvents(string query, Func<IReadOnlyCollection<EventData>, Task> callback, CancellationToken cancellationToken = default)
             => this.LoadEvents(new QueryDefinition(query), callback, cancellationToken);
@@ -317,11 +386,11 @@ namespace Eveneum
         public Task<Response> LoadStreamHeaders(QueryDefinition query, Func<IReadOnlyCollection<StreamHeader>, Task> callback, CancellationToken cancellationToken = default)
             => LoadDocuments(query, response => callback(response.Where(x => x.DocumentType == DocumentType.Header).Select(x => new StreamHeader(x.StreamId, x.Version, this.Serializer.DeserializeObject(x.MetadataType, x.Metadata), x.Deleted)).ToList()), cancellationToken);
 
-        public async Task<Response> ReplaceEvent(EventData newEvent, CancellationToken cancellationToken = default)
+        public async Task<Response> ReplaceEvent(string partitionKey, EventData newEvent, CancellationToken cancellationToken = default)
         {
             try
             {
-                var response = await this.Container.ReplaceItemAsync(this.Serializer.SerializeEvent(newEvent, newEvent.StreamId), EveneumDocument.GenerateEventId(newEvent.StreamId, newEvent.Version), new PartitionKey(newEvent.StreamId), cancellationToken: cancellationToken);
+                var response = await this.Container.ReplaceItemAsync(this.Serializer.SerializeEvent(newEvent, newEvent.StreamId, partitionKey), EveneumDocument.GenerateEventId(newEvent.StreamId, newEvent.Version), new PartitionKey(partitionKey), cancellationToken: cancellationToken);
 
                 return new Response(response.RequestCharge);
             }
@@ -331,9 +400,9 @@ namespace Eveneum
             }
         }
 
-        public async Task<StreamHeaderResponse> ReadHeader(string streamId, CancellationToken cancellationToken = default)
+        public async Task<StreamHeaderResponse> ReadHeader(string partitionKey, string streamId, CancellationToken cancellationToken = default)
         {
-            var result = await this.ReadHeaderDocument(streamId, cancellationToken);
+            var result = await this.ReadHeaderDocument(partitionKey, streamId, cancellationToken);
 
             return new StreamHeaderResponse(new StreamHeader(streamId, result.Document.Version, this.Serializer.DeserializeObject(result.Document.MetadataType, result.Document.Metadata), result.Document.Deleted), result.RequestCharge);
         }
@@ -362,7 +431,7 @@ namespace Eveneum
             return new Response(requestCharge);
         }
 
-        private async Task<DocumentResponse> ReadHeaderDocument(string streamId, CancellationToken cancellationToken = default)
+        private async Task<DocumentResponse> ReadHeaderDocument(string partitionKey, string streamId, CancellationToken cancellationToken = default)
         {
             try
             {

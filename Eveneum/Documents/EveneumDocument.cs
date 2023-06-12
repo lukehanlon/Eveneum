@@ -16,24 +16,37 @@ namespace Eveneum.Documents
 
         public const char Separator = '~';
 
+        public string PartitionKey { get; set; }
+
 
         [JsonProperty(PropertyName = "id")]
         public virtual string Id => this.GenerateId();
 
         [JsonConverter(typeof(StringEnumConverter))]
+        [JsonProperty(PropertyName = "dt")]
         public DocumentType DocumentType { get; }
 
+        [JsonProperty(PropertyName = "sid")]
         public string StreamId { get; set; }
 
+        [JsonProperty(PropertyName = "v")]
         public ulong Version { get; set; }
 
+        [JsonProperty(PropertyName = "mt")]
         public string MetadataType { get; set; }
+
+        [JsonProperty(PropertyName = "m")]
         public JToken Metadata { get; set; }
+
+        [JsonProperty(PropertyName = "bt")]
         public string BodyType { get; set; }
+
+        [JsonProperty(PropertyName = "b")]
         public JToken Body { get; set; }
 
         public decimal SortOrder => this.Version + GetOrderingFraction(this.DocumentType);
-
+        
+        [JsonProperty(PropertyName = "d")]
         public bool Deleted { get; set; }
 
         [JsonProperty(PropertyName = "_etag")]
