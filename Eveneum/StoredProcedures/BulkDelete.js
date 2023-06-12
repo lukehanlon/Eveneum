@@ -50,7 +50,7 @@
             var isAccepted = true;
 
             if (softDelete) {
-                documents[0].Deleted = true;
+                documents[0].d = true;
 
                 if (ttl > 0) {
                     documents[0].ttl = ttl;
