@@ -5,7 +5,17 @@ using Newtonsoft.Json.Linq;
 
 namespace Eveneum.Documents
 {
-    public enum DocumentType { Header = 1, Event, Snapshot }
+    public enum DocumentType { Header = 1, Event, Snapshot, EventId }
+
+    public class IdempotenceRecord
+    {
+
+        [JsonConverter(typeof(StringEnumConverter))]
+        [JsonProperty(PropertyName = "dt")]
+        public DocumentType DocumentType { get; }
+
+
+    }
 
     public class EveneumDocument
     {
@@ -16,6 +26,7 @@ namespace Eveneum.Documents
 
         public const char Separator = '~';
 
+        [JsonProperty(PropertyName = "pk")]
         public string PartitionKey { get; set; }
 
 
@@ -44,6 +55,7 @@ namespace Eveneum.Documents
         [JsonProperty(PropertyName = "b")]
         public JToken Body { get; set; }
 
+        [JsonProperty(PropertyName = "so")]
         public decimal SortOrder => this.Version + GetOrderingFraction(this.DocumentType);
         
         [JsonProperty(PropertyName = "d")]

@@ -196,9 +196,9 @@ namespace Eveneum
                 var events = eventStream.Events.Select(@event => this.Serializer.SerializeEvent(@event, eventStream.StreamId, partitionKey));
                 foreach (var document in events)
                     transaction.CreateItem(document);
-                var idempotenceRecord = eventStream.Events.Select(@event => this.Serializer.SerializeEvent(@event, eventStream.StreamId, partitionKey));
-                foreach (var document in events)
-                    transaction.CreateItem(document);
+                //var idempotenceRecords = eventStream.Events.Select(@event => new IdempotenceRecord()));
+                //foreach (var document in idempotenceRecords)
+                //    transaction.CreateItem(document);
             }
 
 
