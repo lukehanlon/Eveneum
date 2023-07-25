@@ -144,14 +144,35 @@ namespace Eveneum
             }
         }
 
+        public async Task<string[]> GetMatchingEventsForPartition(string partitionKey, string[] eventIds)
+        {
+            string queryString = $"SELECT c.EventId FROM c WHERE c.PartitionId = '{partitionKey}' AND c.EventId IN ([{string.Join(",", eventIds.Select(s => $"'{s}'"))}])";
+            FeedIterator<EveneumDocument> queryResultSetIterator = this.Container.GetItemQueryIterator<EveneumDocument>(
+                queryString,
+                requestOptions: new QueryRequestOptions { /* any optional request options you want to specify */ });
+
+            List<string> eventIdsDuplicated = new List<string>();
+            while (queryResultSetIterator.HasMoreResults)
+            {
+                FeedResponse<EveneumDocument> currentResultSet = await queryResultSetIterator.ReadNextAsync();
+                foreach (EveneumDocument item in currentResultSet)
+                {
+                    eventIdsDuplicated.Add(item.EventId);
+                }
+            }
+
+            return eventIdsDuplicated.ToArray();
+        }
+
 
         public async Task<Response> WriteToPartition(string partitionKey,
             EventStream[] eventStreams, CancellationToken cancellationToken = default)
         {
             var transaction = this.Container.CreateTransactionalBatch(new PartitionKey(partitionKey));
             double requestCharge = 0;
+            
 
-            var maximumItems = eventStreams.Sum(s => (s.Events.Length * 2) + 1);
+            var maximumItems = eventStreams.Length  * 2;
 
             if (maximumItems > 100)
             {
@@ -159,14 +180,18 @@ namespace Eveneum
                     $"The maximum number of events that can be written has been exceeded. Attempted to write {maximumItems} events. The maximum number is 49.");
             }
 
+            var eventStreamsToWrite = new List<Tuple<EveneumDocument, List<EveneumDocument>, bool>>();
+
+
             foreach (var eventStream in eventStreams)
             {
                 // Existing stream
+                EveneumDocument header = null;
                 if (eventStream.ExpectedVersion.HasValue)
                 {
                     var headerResponse = await this.ReadHeaderDocument(partitionKey, eventStream.StreamId,  cancellationToken);
 
-                    var header = headerResponse.Document;
+                    header = headerResponse.Document;
                     requestCharge += headerResponse.RequestCharge;
 
                     if (header.Deleted)
@@ -182,10 +207,11 @@ namespace Eveneum
 
                     transaction.ReplaceItem(header.Id, header,
                         new TransactionalBatchItemRequestOptions { IfMatchEtag = header.ETag });
+
                 }
                 else
                 {
-                    var header = new EveneumDocument(DocumentType.Header)
+                    header = new EveneumDocument(DocumentType.Header)
                     { StreamId = eventStream.StreamId, Version = (ulong)eventStream.Events.Length, PartitionKey = partitionKey };
 
                     this.Serializer.SerializeHeaderMetadata(header, eventStream.Metadata);
@@ -193,22 +219,23 @@ namespace Eveneum
                     transaction.CreateItem(header);
                 }
 
-                var events = eventStream.Events.Select(@event => this.Serializer.SerializeEvent(@event, eventStream.StreamId, partitionKey));
+                var events = eventStream.Events.Select(@event => this.Serializer.SerializeEvent(@event, eventStream.StreamId, partitionKey)).ToList();
                 foreach (var document in events)
+                {
                     transaction.CreateItem(document);
-                //var idempotenceRecords = eventStream.Events.Select(@event => new IdempotenceRecord()));
-                //foreach (var document in idempotenceRecords)
-                //    transaction.CreateItem(document);
-            }
+                }
 
+                eventStreamsToWrite.Add(new Tuple<EveneumDocument, List<EveneumDocument>, bool>(header, events, eventStream.ExpectedVersion.HasValue)) ;
+            }
 
             var response = await transaction.ExecuteAsync(cancellationToken);
             requestCharge += response.RequestCharge;
 
-            if (response.StatusCode == System.Net.HttpStatusCode.Conflict)
-                throw new StreamAlreadyExistsException(string.Join(",", eventStreams.Select(s => s.StreamId)), requestCharge);
-            else if (!response.IsSuccessStatusCode)
-                throw new WriteException(string.Join(",", eventStreams.Select(s => s.StreamId)), requestCharge, response.ErrorMessage, response.StatusCode);
+            if (!response.IsSuccessStatusCode)
+            {
+                throw new WriteException(string.Join(",", eventStreams.Select(s => s.StreamId)), requestCharge,
+                    response.ErrorMessage, response.StatusCode);
+            }
 
             return new Response(requestCharge);
         }
@@ -390,7 +417,7 @@ namespace Eveneum
         {
             try
             {
-                var response = await this.Container.ReplaceItemAsync(this.Serializer.SerializeEvent(newEvent, newEvent.StreamId, partitionKey), EveneumDocument.GenerateEventId(newEvent.StreamId, newEvent.Version), new PartitionKey(partitionKey), cancellationToken: cancellationToken);
+                var response = await this.Container.ReplaceItemAsync(this.Serializer.SerializeEvent(newEvent, newEvent.StreamId, partitionKey), EveneumDocument.GenerateEventId(newEvent.StreamId, newEvent.EventId), new PartitionKey(partitionKey), cancellationToken: cancellationToken);
 
                 return new Response(response.RequestCharge);
             }

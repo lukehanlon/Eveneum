@@ -8,8 +8,9 @@
         public ulong Version;
         public string Timestamp;
         public bool Deleted;
+        public string EventId;
 
-        public EventData(string streamId, object body, object metadata, ulong version, string timestamp, bool deleted = false)
+        public EventData(string streamId, object body, object metadata, ulong version, string eventId, string timestamp, bool deleted = false)
         {
             this.StreamId = streamId;
             this.Body = body;
@@ -17,6 +18,8 @@
             this.Version = version;
             this.Timestamp = timestamp;
             this.Deleted = deleted;
+            this.EventId =eventId;
         }
+
     }
 }

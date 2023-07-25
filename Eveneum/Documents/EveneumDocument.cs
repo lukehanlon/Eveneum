@@ -40,6 +40,9 @@ namespace Eveneum.Documents
         [JsonProperty(PropertyName = "sid")]
         public string StreamId { get; set; }
 
+        [JsonProperty(PropertyName = "eid")]
+        public string EventId { get; set; }
+
         [JsonProperty(PropertyName = "v")]
         public ulong Version { get; set; }
 
@@ -77,7 +80,7 @@ namespace Eveneum.Documents
                 case DocumentType.Header:
                     return this.StreamId;
                 case DocumentType.Event:
-                    return GenerateEventId(this.StreamId, this.Version);
+                    return GenerateEventId(this.StreamId, this.EventId);
                 case DocumentType.Snapshot:
                     return $"{this.StreamId}{Separator}{this.Version}{Separator}S";
                 default:
@@ -85,7 +88,7 @@ namespace Eveneum.Documents
             }
         }
 
-        internal static string GenerateEventId(string streamId, ulong version) => $"{streamId}{Separator}{version}";
+        internal static string GenerateEventId(string streamId, string eventId) => $"{streamId}{Separator}{eventId}";
 
         internal static decimal GetOrderingFraction(DocumentType documentType)
         {
