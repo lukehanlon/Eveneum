@@ -146,10 +146,13 @@ namespace Eveneum
 
         public async Task<string[]> GetMatchingEventsForPartition(string partitionKey, string[] eventIds)
         {
-            string queryString = $"SELECT c.EventId FROM c WHERE c.PartitionId = '{partitionKey}' AND c.EventId IN ([{string.Join(",", eventIds.Select(s => $"'{s}'"))}])";
+            string queryString = $"SELECT c.eid FROM c WHERE c.eid IN ({string.Join(",", eventIds.Select(s => $"\"{s}\""))})";
             FeedIterator<EveneumDocument> queryResultSetIterator = this.Container.GetItemQueryIterator<EveneumDocument>(
                 queryString,
-                requestOptions: new QueryRequestOptions { /* any optional request options you want to specify */ });
+                requestOptions: new QueryRequestOptions
+                {
+                    PartitionKey = new PartitionKey(partitionKey)
+                });
 
             List<string> eventIdsDuplicated = new List<string>();
             while (queryResultSetIterator.HasMoreResults)
