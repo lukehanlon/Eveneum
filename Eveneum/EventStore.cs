@@ -172,17 +172,14 @@ namespace Eveneum
             double requestCharge = 0;
             
 
-            var maximumItems = eventStreams.Length  * 2;
+            var maximumItems = eventStreams.Sum(s => s.Events.Length) + eventStreams.Length;
 
             if (maximumItems > 100)
             {
                 throw new NotSupportedException(
                     $"The maximum number of events that can be written has been exceeded. Attempted to write {maximumItems} events. The maximum number is 49.");
             }
-
-            var eventStreamsToWrite = new List<Tuple<EveneumDocument, List<EveneumDocument>, bool>>();
-
-
+            
             foreach (var eventStream in eventStreams)
             {
                 // Existing stream
@@ -225,8 +222,7 @@ namespace Eveneum
                     transaction.CreateItem(document);
                 }
 
-                eventStreamsToWrite.Add(new Tuple<EveneumDocument, List<EveneumDocument>, bool>(header, events, eventStream.ExpectedVersion.HasValue)) ;
-            }
+             }
 
             var response = await transaction.ExecuteAsync(cancellationToken);
             requestCharge += response.RequestCharge;
